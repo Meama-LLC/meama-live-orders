@@ -1,18 +1,18 @@
 'use client';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { supabase } from '../lib/supabase';
 
+// ── CHANNEL CONFIG (mirrors lib/shopify.js STORES, client-safe) ─────────────
 const CHANNELS = [
-  { id: 'vending', label: 'Vending', color: '#4A9EFF', table: 'vending_orders', itemsTable: 'vending_order_items', regionField: null, defaultRegion: 'Tbilisi' },
-  { id: 'b2b', label: 'B2B', color: '#A855F7', table: 'b2b_orders', itemsTable: 'b2b_order_items', regionField: 'shipping_city', defaultRegion: 'B2B' },
-  { id: 'b2c', label: 'B2C', color: '#FF8C42', table: 'orders', itemsTable: 'order_items', regionField: 'shipping_city', defaultRegion: 'Georgia' },
-  { id: 'franchise', label: 'Franchise', color: '#C084FC', table: 'franchise_orders', itemsTable: 'franchise_order_items', regionField: 'shipping_city', defaultRegion: 'Franchise' },
-  { id: 'ecommerce', label: 'eCommerce', color: '#1DB8A0', table: 'meama_collect_orders', itemsTable: 'meama_collect_order_items', regionField: null, defaultRegion: 'Online' },
+  { id: 'vending',   label: 'Vending',   color: '#4A9EFF', defaultRegion: 'Tbilisi'   },
+  { id: 'b2b',       label: 'B2B',       color: '#A855F7', defaultRegion: 'B2B'       },
+  { id: 'b2c',       label: 'B2C',       color: '#FF8C42', defaultRegion: 'Georgia'   },
+  { id: 'franchise', label: 'Franchise', color: '#C084FC', defaultRegion: 'Franchise' },
+  { id: 'ecommerce', label: 'eCommerce', color: '#1DB8A0', defaultRegion: 'Online'    },
 ];
 const PARTICLE_COLORS = ['#A855F7','#C084FC','#E9D5FF','#7C3AED','#DDD6FE','#F0ABFC','#D946EF','#818CF8','#6366F1','#FFFFFF'];
 const REV_MULT = 3;
 
-// ── REAL MEAMA COLLECT PRODUCTS & PRICES ─────
+// ── FAKE PRODUCTS FOR VISUAL FILL (shown when real orders are sparse) ────────
 const FAKE_PRODUCTS = [
   {name:'Espresso',p:4.00,w:18},{name:'Americano (8oz)',p:3.90,w:20},{name:'Americano',p:6.50,w:16},
   {name:'Cappuccino',p:7.00,w:18},{name:'Latte',p:7.00,w:16},{name:'Lungo',p:4.50,w:14},
@@ -45,7 +45,6 @@ const FAKE_PRODUCTS = [
   {name:'Multi Multivitamin',p:19.80,w:2},{name:'Multi Coconut',p:19.80,w:3},
   {name:'Multi Hazelnut Chocolate',p:19.80,w:3},
 ];
-
 const FAKE_NAMES = [
   'Giorgi Maisuradze','Nino Kapanadze','Luka Tskhvediani','Mariam Svanidze','Davit Beridze',
   'Tamar Gelashvili','Nika Rurua','Ana Dolidze','Sandro Lomidze','Elene Vashakidze',
@@ -70,11 +69,11 @@ const FAKE_LOCS = [
   'East Point Mall','City Mall','Tbilisi Mall','Galleria Tbilisi',
 ];
 
-const rand = (a, b) => Math.random() * (b - a) + a;
+const rand  = (a, b) => Math.random() * (b - a) + a;
 const randI = (a, b) => Math.floor(rand(a, b + 1));
-const pick = a => a[Math.floor(Math.random() * a.length)];
-const fmtI = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k ₾' : Math.round(n) + ' ₾';
-const ts = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const pick  = a => a[Math.floor(Math.random() * a.length)];
+const fmtI  = n => n >= 1000 ? (n / 1000).toFixed(1) + 'k ₾' : Math.round(n) + ' ₾';
+const ts    = () => new Date().toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
 
 function wPick(arr) {
   const tot = arr.reduce((s, p) => s + (p.w || 1), 0);
@@ -84,7 +83,7 @@ function wPick(arr) {
 }
 
 function genFakeTx() {
-  const ch = pick(CHANNELS.filter(c => c.id !== 'b2b'));
+  const ch   = pick(CHANNELS.filter(c => c.id !== 'b2b'));
   const prod = wPick(FAKE_PRODUCTS);
   const isCapsule = prod.p >= 15;
   let qty = 1;
@@ -98,13 +97,7 @@ function genFakeTx() {
   return { ch, prod: displayName, qty, amount, loc: pick(FAKE_LOCS), customer: pick(FAKE_NAMES), time: ts(), ts: Date.now(), isFake: true };
 }
 
-function cleanEmail(email) {
-  if (!email || !email.includes('@')) return email || '';
-  const local = email.split('@')[0].replace(/[._0-9]/g, ' ').trim();
-  return local.split(' ').filter(w => w.length > 1).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-}
-
-// ── AUTO SCALE ─────────────────────────────────
+// ── AUTO SCALE ───────────────────────────────────────────────────────────────
 function getScale() {
   if (typeof window === 'undefined') return 1;
   const w = window.innerWidth;
@@ -115,19 +108,51 @@ function getScale() {
   return 1;
 }
 
+// ── SHOPIFY ORDER POLLING ────────────────────────────────────────────────────
+const CHANNEL_BY_ID = Object.fromEntries(CHANNELS.map(c => [c.id, c]));
+const POLL_INTERVAL  = 15_000; // ms between polls for new orders
+
+async function fetchOrders(since) {
+  try {
+    const res = await fetch(`/api/orders?since=${encodeURIComponent(since)}`);
+    if (!res.ok) return {};
+    const { orders } = await res.json();
+    return orders || {};
+  } catch (e) {
+    console.error('[LiveOrders] fetch failed:', e);
+    return {};
+  }
+}
+
+function shopifyOrderToTx(order, ch) {
+  return {
+    ch,
+    prod:     order.prod,
+    qty:      order.qty,
+    amount:   order.total,
+    loc:      order.city || ch.defaultRegion,
+    customer: order.customer || '',
+    time:     new Date(order.createdAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', second: '2-digit' }),
+    ts:       new Date(order.createdAt).getTime(),
+    isFake:   false,
+  };
+}
+
+// ── COMPONENT ────────────────────────────────────────────────────────────────
 export default function LiveOrders() {
-  const streamRef = useRef(null);
+  const streamRef    = useRef(null);
   const streamElsRef = useRef([]);
   const S_data = useRef({ orders: 0, revenue: 0, maxAmt: 0, chCounts: {}, prodRev: {}, buf: [], times: [], lastBigClient: null });
   const [, forceUpdate] = useState(0);
   const tickerRef1 = useRef(null);
   const tickerRef2 = useRef(null);
-  const scrollPos = useRef({ s1: 0, s2: 0, lastT: 0 });
+  const scrollPos  = useRef({ s1: 0, s2: 0, lastT: 0 });
   const [scale, setScale] = useState(1);
-  const scaleRef = useRef(1);
+  const scaleRef   = useRef(1);
+  const seenIds    = useRef(new Set()); // deduplicate real Shopify order IDs
   CHANNELS.forEach(c => { if (!S_data.current.chCounts[c.id]) S_data.current.chCounts[c.id] = 0; });
 
-  // ── DETECT SCREEN SIZE ───────────────────────
+  // ── DETECT SCREEN SIZE ───────────────────────────────────────────────────
   useEffect(() => {
     const update = () => { const s = getScale(); setScale(s); scaleRef.current = s; };
     update();
@@ -135,9 +160,9 @@ export default function LiveOrders() {
     return () => window.removeEventListener('resize', update);
   }, []);
 
-  const V = scale; // alias for CSS template
+  const V = scale;
 
-  // ── ORDER NOTIFICATION SOUND (Web Audio API) ──
+  // ── ORDER NOTIFICATION SOUND ─────────────────────────────────────────────
   const audioCtxRef = useRef(null);
   const playSound = useCallback((big = false) => {
     try {
@@ -145,33 +170,24 @@ export default function LiveOrders() {
       const ctx = audioCtxRef.current;
       if (ctx.state === 'suspended') ctx.resume();
       const now = ctx.currentTime;
-
       if (big) {
-        // Big order: rich two-tone chime
         [[880, 0, .12], [1320, .08, .15], [1760, .15, .2]].forEach(([freq, delay, dur]) => {
-          const osc = ctx.createOscillator();
-          const gain = ctx.createGain();
-          osc.type = 'sine';
-          osc.frequency.value = freq;
+          const osc = ctx.createOscillator(); const gain = ctx.createGain();
+          osc.type = 'sine'; osc.frequency.value = freq;
           gain.gain.setValueAtTime(0, now + delay);
           gain.gain.linearRampToValueAtTime(.12, now + delay + .01);
           gain.gain.exponentialRampToValueAtTime(.001, now + delay + dur);
           osc.connect(gain).connect(ctx.destination);
-          osc.start(now + delay);
-          osc.stop(now + delay + dur + .01);
+          osc.start(now + delay); osc.stop(now + delay + dur + .01);
         });
       } else {
-        // Normal order: soft short ding
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sine';
-        osc.frequency.value = 1200;
+        const osc = ctx.createOscillator(); const gain = ctx.createGain();
+        osc.type = 'sine'; osc.frequency.value = 1200;
         gain.gain.setValueAtTime(0, now);
         gain.gain.linearRampToValueAtTime(.07, now + .005);
         gain.gain.exponentialRampToValueAtTime(.001, now + .1);
         osc.connect(gain).connect(ctx.destination);
-        osc.start(now);
-        osc.stop(now + .12);
+        osc.start(now); osc.stop(now + .12);
       }
     } catch (e) { /* audio not supported */ }
   }, []);
@@ -229,55 +245,73 @@ export default function LiveOrders() {
     forceUpdate(n=>n+1);
   }, [addToStream]);
 
+  // ── DATA: SHOPIFY POLLING ────────────────────────────────────────────────
   useEffect(() => {
-    const todayStart = new Date(); todayStart.setHours(0,0,0,0);
-    (async () => {
-      const results = await Promise.allSettled(CHANNELS.map(ch => {
-        let sel = 'shopify_id,name,total_price,created_at,financial_status,tags,customer_email';
-        if (ch.regionField) sel += ','+ch.regionField;
-        if (ch.id==='vending') sel += ',vms_name,vms_id';
-        return supabase.from(ch.table).select(sel).gte('created_at', todayStart.toISOString()).order('created_at',{ascending:false}).limit(200);
-      }));
-      const itemResults = await Promise.allSettled(CHANNELS.map(ch => supabase.from(ch.itemsTable).select('order_shopify_id,title,quantity').limit(1500)));
-      const itemsByStore = {};
-      CHANNELS.forEach((ch,i) => { const data = (itemResults[i].status==='fulfilled'&&itemResults[i].value.data)||[]; const map = {}; data.forEach(it=>{if(!map[it.order_shopify_id])map[it.order_shopify_id]=[];map[it.order_shopify_id].push(it);}); itemsByStore[ch.id]=map; });
-      const st = S_data.current; let allTx = [];
-      CHANNELS.forEach((ch,i) => {
-        const data = (results[i].status==='fulfilled'&&results[i].value.data)||[];
-        data.forEach(raw => {
-          const amount = parseFloat(raw.total_price||0); if (amount<=0) return;
-          const items = (itemsByStore[ch.id]||{})[raw.shopify_id]||[];
-          let prod;
-          if (items.length > 0) { prod = items.map(it => { let t = it.title||'Product'; if(t.length>50) t=t.slice(0,47)+'...'; return t+(it.quantity>1?' x'+it.quantity:''); }).join(', '); }
-          else { prod = raw.vms_name || raw.tags || 'Coffee Order'; }
-          const qty = items.reduce((s,it)=>s+(it.quantity||1),0)||1;
-          const loc = (ch.regionField&&raw[ch.regionField])||ch.defaultRegion||'';
-          let customer = cleanEmail(raw.customer_email);
-          if (!customer && raw.vms_name) customer = raw.vms_name;
-          const createdAt = raw.created_at ? new Date(raw.created_at) : new Date();
-          const tx = { ch, prod, qty, amount, loc, customer, time: createdAt.toLocaleTimeString('en-GB',{hour:'2-digit',minute:'2-digit',second:'2-digit'}), ts: createdAt.getTime() };
+    const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
+    let lastPollTime  = todayStart.toISOString();
+    let pollTimer;
+    let destroyed = false;
+
+    // Load today's historical orders on mount
+    async function loadInitial() {
+      const storeOrders = await fetchOrders(todayStart.toISOString());
+      if (destroyed) return;
+      const st = S_data.current;
+      let allTx = [];
+
+      CHANNELS.forEach(ch => {
+        (storeOrders[ch.id] || []).forEach(order => {
+          const key = `${ch.id}:${order.id}`;
+          if (seenIds.current.has(key)) return;
+          seenIds.current.add(key);
+
+          const tx = shopifyOrderToTx(order, ch);
           allTx.push(tx);
-          st.orders++; st.revenue += amount * REV_MULT; st.chCounts[ch.id]=(st.chCounts[ch.id]||0)+1;
-          const pk = prod.length>40?prod.slice(0,40)+'...':prod;
-          if(!st.prodRev[pk]) st.prodRev[pk]={rev:0}; st.prodRev[pk].rev+=amount*REV_MULT;
-          st.buf.push(tx); if(st.buf.length>60) st.buf.shift();
-          if(amount>st.maxAmt && ch.id!=='b2b'){st.maxAmt=amount;st.lastBigClient={name:customer||prod,channel:ch.label,loc,amount:amount,time:tx.time};}
+          st.orders++;
+          st.revenue += tx.amount * REV_MULT;
+          st.chCounts[ch.id] = (st.chCounts[ch.id] || 0) + 1;
+          const pk = tx.prod.length > 40 ? tx.prod.slice(0, 40) + '...' : tx.prod;
+          if (!st.prodRev[pk]) st.prodRev[pk] = { rev: 0 };
+          st.prodRev[pk].rev += tx.amount * REV_MULT;
+          st.buf.push(tx); if (st.buf.length > 60) st.buf.shift();
+          if (tx.amount > st.maxAmt && ch.id !== 'b2b') {
+            st.maxAmt = tx.amount;
+            st.lastBigClient = { name: tx.customer || tx.prod, channel: ch.label, loc: tx.loc, amount: tx.amount, time: tx.time };
+          }
         });
       });
-      allTx.sort((a,b)=>b.ts-a.ts);
-      allTx.slice(0,7).reverse().forEach(tx=>addToStream(tx));
-      forceUpdate(n=>n+1);
-    })();
-    const channels = CHANNELS.map(ch => supabase.channel('rt_'+ch.table).on('postgres_changes',{event:'INSERT',schema:'public',table:ch.table},(payload)=>{
-      const raw=payload.new; const amount=parseFloat(raw.total_price||0); if(amount<=0)return;
-      let customer = cleanEmail(raw.customer_email);
-      if (!customer && raw.vms_name) customer = raw.vms_name;
-      processTx({ch,prod:raw.vms_name||raw.tags||'New Order',qty:1,amount,loc:(ch.regionField&&raw[ch.regionField])||ch.defaultRegion||'',customer,time:ts()});
-    }).subscribe());
+
+      lastPollTime = new Date().toISOString();
+      allTx.sort((a, b) => b.ts - a.ts);
+      allTx.slice(0, 7).reverse().forEach(tx => addToStream(tx));
+      forceUpdate(n => n + 1);
+    }
+
+    // Poll for new orders since last check
+    async function pollNew() {
+      const since = lastPollTime;
+      lastPollTime = new Date().toISOString();
+      const storeOrders = await fetchOrders(since);
+      if (destroyed) return;
+
+      CHANNELS.forEach(ch => {
+        (storeOrders[ch.id] || []).forEach(order => {
+          const key = `${ch.id}:${order.id}`;
+          if (seenIds.current.has(key)) return; // deduplicate
+          seenIds.current.add(key);
+          processTx(shopifyOrderToTx(order, ch));
+        });
+      });
+    }
+
+    loadInitial();
+    pollTimer = setInterval(pollNew, POLL_INTERVAL);
+
+    // Fake orders for visual fill between real orders
     function pushSmall() {
       const smallProducts = FAKE_PRODUCTS.filter(p => p.p <= 7);
       const prod = pick(smallProducts);
-      processTx({ ch: pick(CHANNELS.filter(c=>c.id!=='b2b')), prod: prod.name, qty: 1, amount: prod.p, loc: pick(FAKE_LOCS), customer: pick(FAKE_NAMES), time: ts(), ts: Date.now(), isFake: true });
+      processTx({ ch: pick(CHANNELS.filter(c => c.id !== 'b2b')), prod: prod.name, qty: 1, amount: prod.p, loc: pick(FAKE_LOCS), customer: pick(FAKE_NAMES), time: ts(), ts: Date.now(), isFake: true });
     }
     function scheduleFake() {
       return setTimeout(() => {
@@ -288,22 +322,56 @@ export default function LiveOrders() {
       }, randI(3000, 5000));
     }
     const fakeTimer = scheduleFake();
-    const rid = setInterval(()=>forceUpdate(n=>n+1),60000);
-    return ()=>{channels.forEach(c=>supabase.removeChannel(c));clearInterval(rid);clearTimeout(fakeTimer);};
+    const rid = setInterval(() => forceUpdate(n => n + 1), 60000);
+
+    return () => {
+      destroyed = true;
+      clearInterval(pollTimer);
+      clearInterval(rid);
+      clearTimeout(fakeTimer);
+    };
   }, [addToStream, processTx]);
 
-  useEffect(()=>{const t=setInterval(()=>{const el=document.getElementById('live-clock');if(el)el.textContent='Live · '+ts();const st=S_data.current;const now=Date.now();st.times=st.times.filter(t=>now-t<60000);const r=document.getElementById('h-rate');if(r)r.textContent=st.times.length+'/min';},1000);return()=>clearInterval(t);},[]);
-  useEffect(()=>{let running=true;const raf=(timestamp)=>{if(!running)return;const sp=scrollPos.current;if(sp.lastT){const dt=Math.min(timestamp-sp.lastT,50);const e1=tickerRef1.current,e2=tickerRef2.current;if(e1&&e1.scrollWidth>10){sp.s1=(sp.s1+.044*dt)%(e1.scrollWidth/2);e1.style.transform='translateX(-'+sp.s1+'px)';}if(e2&&e2.scrollWidth>10){sp.s2=(sp.s2+.044*dt)%(e2.scrollWidth/2);e2.style.transform='translateX(-'+sp.s2+'px)';}}sp.lastT=timestamp;requestAnimationFrame(raf);};requestAnimationFrame(raf);return()=>{running=false;};},[]);
+  // ── LIVE CLOCK & ORDER RATE ──────────────────────────────────────────────
+  useEffect(() => {
+    const t = setInterval(() => {
+      const el = document.getElementById('live-clock'); if (el) el.textContent = 'Live · ' + ts();
+      const st = S_data.current; const now = Date.now();
+      st.times = st.times.filter(t => now - t < 60000);
+      const r = document.getElementById('h-rate'); if (r) r.textContent = st.times.length + '/min';
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
 
+  // ── TICKER SCROLL ────────────────────────────────────────────────────────
+  useEffect(() => {
+    let running = true;
+    const raf = (timestamp) => {
+      if (!running) return;
+      const sp = scrollPos.current;
+      if (sp.lastT) {
+        const dt = Math.min(timestamp - sp.lastT, 50);
+        const e1 = tickerRef1.current, e2 = tickerRef2.current;
+        if (e1 && e1.scrollWidth > 10) { sp.s1 = (sp.s1 + .044*dt) % (e1.scrollWidth/2); e1.style.transform = 'translateX(-' + sp.s1 + 'px)'; }
+        if (e2 && e2.scrollWidth > 10) { sp.s2 = (sp.s2 + .044*dt) % (e2.scrollWidth/2); e2.style.transform = 'translateX(-' + sp.s2 + 'px)'; }
+      }
+      sp.lastT = timestamp;
+      requestAnimationFrame(raf);
+    };
+    requestAnimationFrame(raf);
+    return () => { running = false; };
+  }, []);
+
+  // ── RENDER ───────────────────────────────────────────────────────────────
   const st = S_data.current;
-  const aov = st.orders>0?fmtI(st.revenue/st.orders):'0 ₾';
-  const chSorted = [...CHANNELS].sort((a,b)=>(st.chCounts[b.id]||0)-(st.chCounts[a.id]||0));
-  const chTotal = Object.values(st.chCounts).reduce((a,b)=>a+b,0)||1;
-  const topProds = Object.entries(st.prodRev).sort((a,b)=>b[1].rev-a[1].rev).slice(0,4);
+  const aov = st.orders > 0 ? fmtI(st.revenue / st.orders) : '0 ₾';
+  const chSorted = [...CHANNELS].sort((a, b) => (st.chCounts[b.id]||0) - (st.chCounts[a.id]||0));
+  const chTotal  = Object.values(st.chCounts).reduce((a, b) => a + b, 0) || 1;
+  const topProds = Object.entries(st.prodRev).sort((a, b) => b[1].rev - a[1].rev).slice(0, 4);
   const bigClient = st.lastBigClient;
-  const tickerRecent = [...st.buf,...st.buf].map(tx=>'<span style="display:inline-flex;align-items:center;gap:'+6*V+'px;font-size:'+11*V+'px"><span style="width:'+5*V+'px;height:'+5*V+'px;border-radius:50%;background:'+tx.ch.color+';flex-shrink:0"></span><span style="color:rgba(255,255,255,.58)">'+((tx.prod||'').slice(0,28))+'</span><span style="color:rgba(255,255,255,.18)">·</span><span style="color:'+tx.ch.color+';font-family:Space Mono,monospace;font-size:'+10*V+'px">'+tx.amount.toFixed(2)+' ₾</span></span>').join('<span style="width:'+34*V+'px;display:inline-block"></span>');
-  const chRevTicker = CHANNELS.map(ch=>({ch,rev:st.buf.filter(t=>t.ch.id===ch.id).reduce((s,t)=>s+t.amount*REV_MULT,0)})).sort((a,b)=>b.rev-a.rev);
-  const tickerCh = [...chRevTicker,...chRevTicker].map(({ch,rev})=>'<span style="display:inline-flex;align-items:center;gap:'+6*V+'px;font-size:'+11*V+'px"><span style="width:'+5*V+'px;height:'+5*V+'px;border-radius:50%;background:'+ch.color+'"></span><span style="color:'+ch.color+';font-weight:500">'+ch.label+'</span><span style="color:rgba(255,255,255,.18)">·</span><span style="color:'+ch.color+';font-family:Space Mono,monospace;font-size:'+10*V+'px">'+fmtI(rev)+'</span></span>').join('<span style="width:'+34*V+'px;display:inline-block"></span>');
+  const tickerRecent = [...st.buf,...st.buf].map(tx => '<span style="display:inline-flex;align-items:center;gap:'+6*V+'px;font-size:'+11*V+'px"><span style="width:'+5*V+'px;height:'+5*V+'px;border-radius:50%;background:'+tx.ch.color+';flex-shrink:0"></span><span style="color:rgba(255,255,255,.58)">'+((tx.prod||'').slice(0,28))+'</span><span style="color:rgba(255,255,255,.18)">·</span><span style="color:'+tx.ch.color+';font-family:Space Mono,monospace;font-size:'+10*V+'px">'+tx.amount.toFixed(2)+' ₾</span></span>').join('<span style="width:'+34*V+'px;display:inline-block"></span>');
+  const chRevTicker = CHANNELS.map(ch => ({ch, rev: st.buf.filter(t => t.ch.id === ch.id).reduce((s,t) => s + t.amount * REV_MULT, 0)})).sort((a,b) => b.rev - a.rev);
+  const tickerCh = [...chRevTicker,...chRevTicker].map(({ch,rev}) => '<span style="display:inline-flex;align-items:center;gap:'+6*V+'px;font-size:'+11*V+'px"><span style="width:'+5*V+'px;height:'+5*V+'px;border-radius:50%;background:'+ch.color+'"></span><span style="color:'+ch.color+';font-weight:500">'+ch.label+'</span><span style="color:rgba(255,255,255,.18)">·</span><span style="color:'+ch.color+';font-family:Space Mono,monospace;font-size:'+10*V+'px">'+fmtI(rev)+'</span></span>').join('<span style="width:'+34*V+'px;display:inline-block"></span>');
 
   return (<>
     <style>{`
@@ -370,10 +438,11 @@ export default function LiveOrders() {
               <div className="spot-stat"><div className="spot-stat-val">{bigClient.time}</div><div className="spot-stat-lbl">Time</div></div>
               <div className="spot-stat"><div className="spot-stat-val" style={{color:CHANNELS.find(c=>c.label===bigClient.channel)?.color||'#C084FC'}}>{bigClient.channel}</div><div className="spot-stat-lbl">Channel</div></div>
             </div>}
-        </div></div>
+          </div>
+        </div>
         <div><div className="sb-title">By Channel</div><div className="ch-bars">{chSorted.map(ch=>{const cnt=st.chCounts[ch.id]||0;const pct=((cnt/chTotal)*100).toFixed(0);return(<div className="ch-row" key={ch.id}><div className="ch-name" style={{color:ch.color}}>{ch.label}</div><div className="ch-track"><div className="ch-fill" style={{width:pct+'%',background:ch.color}}/></div><div className="ch-cnt" style={{color:ch.color}}>{cnt}</div></div>);})}</div></div>
         <div><div className="sb-title">Top Products</div><div className="top-prods">{topProds.map(([name,d],i)=>(<div className="tp-row" key={name}><div className="tp-rank">{i+1}</div><div className="tp-name">{name}</div><div className="tp-rev">{fmtI(d.rev)}</div></div>))}{topProds.length===0&&<div style={{fontSize:10*V,color:'rgba(255,255,255,.3)'}}>Loading...</div>}</div></div>
-        <div><div className="sb-title">Tech Stack</div><div className="tech-stack">{['Supabase','Next.js','Vercel','Shopify','Realtime','PostgreSQL','React'].map(t=><span className="tech-badge" key={t}>{t}</span>)}</div></div>
+        <div><div className="sb-title">Tech Stack</div><div className="tech-stack">{['Shopify','Next.js','Vercel','React','Admin API','Live Polling'].map(t=><span className="tech-badge" key={t}>{t}</span>)}</div></div>
       </div>
       <div className="ticker-bar">
         <div className="t-row"><div className="t-lbl">Recent</div><div className="t-track"><div className="t-inner" ref={tickerRef1} dangerouslySetInnerHTML={{__html:tickerRecent}}/></div></div>
